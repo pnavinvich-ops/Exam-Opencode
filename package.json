@@ -1,0 +1,16 @@
+{
+  "name": "physics-exam-library",
+  "version": "1.0.0",
+  "description": "Electronic Exam Question Bank System for distance assessment - Express + SQLite (node:sqlite)",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node --no-warnings server/index.js",
+    "check": "node --check server/index.js && node --check server/db.js && node --check server/auth.js && node --check server/seed.js"
+  },
+  "engines": {
+    "node": ">=23.4.0"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

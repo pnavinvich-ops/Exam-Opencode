@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ระบบคลังข้อสอบฟิสิกส์ | Physics Exam Library</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚛️</text></svg>" />
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <header id="topbar" class="topbar no-print">
+    <div class="topbar-inner">
+      <a class="brand" href="#/" id="brand-link">
+        <span class="brand-icon">⚛️</span>
+        <span class="brand-text">
+          <strong id="brand-th">คลังข้อสอบฟิสิกส์</strong>
+          <small id="brand-en">Physics Exam Library</small>
+        </span>
+      </a>
+      <nav id="main-nav" class="main-nav"></nav>
+      <div class="topbar-actions">
+        <button id="lang-btn" class="btn btn-ghost btn-sm" title="Switch language">EN</button>
+        <div id="user-chip" class="user-chip" hidden></div>
+        <button id="logout-btn" class="btn btn-outline btn-sm no-print" hidden>ออกจากระบบ</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="app" class="app-main">
+    <div class="page-loading">กำลังโหลด…</div>
+  </main>
+
+  <footer class="app-footer no-print">
+    <span id="footer-text">ระบบคลังข้อสอบอิเล็กทรอนิกส์สำหรับการวัดผลระยะไกล (CBT) · Electronic Exam Question Bank for Distance Assessment</span>
+  </footer>
+
+  <div id="toast-wrap" class="toast-wrap"></div>
+  <div id="modal-root"></div>
+
+  <script src="/js/util.js"></script>
+  <script src="/js/i18n.js"></script>
+  <script src="/js/charts.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/views-auth.js"></script>
+  <script src="/js/views-student.js"></script>
+  <script src="/js/views-admin.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>
