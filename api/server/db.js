@@ -2,23 +2,20 @@
 
 // Dual-mode storage adapter.
 //  - Default: embedded SQLite via node:sqlite (local dev).
-//  - If DATABASE_URL is set (libsql://... Turso / or file: URL): @libsql/client.
-// All methods are async in both modes so route handlers stay identical.
+//  - If DATABASE_URL is set (libsql://... Turso): talks the Hrana-over-HTTP v2
+//    protocol directly, because current Turso servers do not accept the
+//    interactive-transaction steps used by @libsql/client. All methods are
+//    async in both modes so route handlers stay identical.
 
 const fs = require('node:fs');
 const path = require('node:path');
 
-const REMOTE_URL = process.env.DATABASE_URL || '';
+const REMOTE_URL = (process.env.DATABASE_URL || '').replace(/\/+$/, '');
+const REMOTE_HTTP = REMOTE_URL.replace(/^libsql:\/\//i, 'https://');
+const REMOTE_TOKEN = process.env.DATABASE_AUTH_TOKEN || '';
 let localDb = null;
-let remoteClient = null;
 
-if (REMOTE_URL) {
-  const { createClient } = require('@libsql/client');
-  remoteClient = createClient({
-    url: REMOTE_URL,
-    authToken: process.env.DATABASE_AUTH_TOKEN || undefined,
-  });
-} else {
+if (!REMOTE_URL) {
   try {
     require('node:sqlite');
   } catch (e) {
@@ -40,21 +37,68 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function decodeHranaCell(v) {
+  if (v == null || typeof v !== 'object') return v;
+  switch (v.type) {
+    case 'null': return null;
+    case 'integer':
+    case 'float':
+      return Number(v.value);
+    case 'text':
+      return v.value == null ? null : String(v.value);
+    case 'blob':
+      return Buffer.from(v.value || '', 'base64');
+    default:
+      return v.value !== undefined ? v.value : v;
+  }
+}
+
 function rowFromLibsql(row, columns) {
   const o = {};
   for (let i = 0; i < columns.length; i++) {
-    let v = row[i];
-    if (typeof v === 'bigint') v = Number(v);
-    o[columns[i]] = v;
+    o[columns[i]] = decodeHranaCell(row[i]);
   }
   return o;
 }
 
-async function all(sql, ...params) {
-  if (remoteClient) {
-    const rs = await remoteClient.execute({ sql, args: normParams(params) });
-    return rs.rows.map((r) => rowFromLibsql(r, rs.columns));
+// ---------- Hrana-over-HTTP v2 (Turso) ----------
+
+function hranaValue(v) {
+  if (v === null) return { type: 'null', value: null };
+  if (typeof v === 'number') return Number.isInteger(v) ? { type: 'integer', value: String(v) } : { type: 'float', value: v };
+  if (typeof v === 'bigint') return { type: 'integer', value: String(v) };
+  return { type: 'text', value: String(v) };
+}
+
+async function pipe(baton, sql, params) {
+  const res = await fetch(`${REMOTE_HTTP}/v2/pipeline`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${REMOTE_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baton, requests: [{ type: 'execute', stmt: { sql, args: params.map(hranaValue) } }] }),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => '')).slice(0, 300);
+    throw new Error(`libsql HTTP ${res.status}: ${detail}`);
   }
+  const data = await res.json();
+  const out = (data.results || [])[0];
+  if (!out || out.type !== 'ok') {
+    throw new Error(`libsql step error: ${JSON.stringify(out).slice(0, 300)}`);
+  }
+  const resp = out.response;
+  if (!resp || resp.type !== 'execute') throw new Error('Unexpected libsql response');
+  const cols = (resp.result.cols || []).map((c) => c.name);
+  return {
+    baton: data.baton,
+    rows: (resp.result.rows || []).map((r) => rowFromLibsql(r, cols)),
+    changes: Number(resp.result.affected_row_count || 0),
+    lastInsertRowid: resp.result.last_insert_rowid != null ? Number(resp.result.last_insert_rowid) : undefined,
+  };
+}
+
+async function all(sql, ...params) {
+  if (REMOTE_URL) return (await pipe(null, sql, normParams(params))).rows;
   return localDb.prepare(sql).all(...normParams(params));
 }
 
@@ -64,43 +108,58 @@ async function get(sql, ...params) {
 }
 
 async function run(sql, ...params) {
-  if (remoteClient) {
-    const rs = await remoteClient.execute({ sql, args: normParams(params) });
-    return {
-      changes: Number(rs.rowsAffected || 0),
-      lastInsertRowid: rs.lastInsertRowid != null ? Number(rs.lastInsertRowid) : undefined,
-    };
+  if (REMOTE_URL) {
+    const r = await pipe(null, sql, normParams(params));
+    return { changes: r.changes, lastInsertRowid: r.lastInsertRowid };
   }
   const r = localDb.prepare(sql).run(...normParams(params));
   return { changes: Number(r.changes), lastInsertRowid: r.lastInsertRowid != null ? Number(r.lastInsertRowid) : undefined };
 }
 
 // tx(fn): fn receives transaction-scoped helpers { get, all, run } as its first argument.
+// On Turso this is a stateful stream: BEGIN IMMEDIATE ... COMMIT/ROLLBACK over one baton.
+// Streams expire server-side after enough wall-clock time, so when that happens mid-way
+// (HTTP 404 "stream not found") the callback is simply re-run from scratch on a fresh stream.
 async function tx(fn) {
-  if (remoteClient) {
-    const t = await remoteClient.transaction('write');
-    const api = {
-      all: async (sql, ...p) => {
-        const rs = await t.execute({ sql, args: normParams(p) });
-        return rs.rows.map((r) => rowFromLibsql(r, rs.columns));
-      },
-      get: async (sql, ...p) => (await api.all(sql, ...p))[0],
-      run: async (sql, ...p) => {
-        const rs = await t.execute({ sql, args: normParams(p) });
-        return {
-          changes: Number(rs.rowsAffected || 0),
-          lastInsertRowid: rs.lastInsertRowid != null ? Number(rs.lastInsertRowid) : undefined,
-        };
-      },
-    };
-    try {
-      const out = await fn(api);
-      await t.commit();
-      return out;
-    } catch (e) {
-      try { await t.rollback(); } catch { /* ignore */ }
-      throw e;
+  if (REMOTE_URL) {
+    const MAX_ATTEMPTS = 5;
+    let lastErr;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      let baton = null;
+      let dead = false;
+      const step = async (sql, ...p) => {
+        if (dead) throw new Error('transaction stream already closed');
+        try {
+          const r = await pipe(baton, sql, normParams(p));
+          baton = r.baton;
+          return r;
+        } catch (e) {
+          if (/stream not found|expired|closed/i.test(String(e.message))) dead = true;
+          throw e;
+        }
+      };
+      const api = {
+        all: async (sql, ...p) => (await step(sql, ...p)).rows,
+        get: async (sql, ...p) => (await step(sql, ...p)).rows[0],
+        run: async (sql, ...p) => {
+          const r = await step(sql, ...p);
+          return { changes: r.changes, lastInsertRowid: r.lastInsertRowid };
+        },
+      };
+      try {
+        await step('BEGIN IMMEDIATE');
+        const out = await fn(api);
+        await step('COMMIT');
+        return out;
+      } catch (e) {
+        lastErr = e;
+        if (!dead) {
+          try { await step('ROLLBACK'); } catch { /* ignore */ }
+        }
+        if (!/stream not found|expired|closed/i.test(String(e.message)) || attempt === MAX_ATTEMPTS) throw e;
+      }
     }
+    throw lastErr;
   }
   localDb.exec('BEGIN');
   const lapi = {

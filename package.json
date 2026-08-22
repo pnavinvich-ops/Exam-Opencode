@@ -11,7 +11,6 @@
     "node": ">=23.4.0"
   },
   "dependencies": {
-    "@libsql/client": "^0.17.4",
     "express": "^5.1.0"
   }
 }
