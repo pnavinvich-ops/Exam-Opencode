@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/index.js": {
+      "runtime": "nodejs22.x",
+      "maxDuration": 15
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api" },
+    { "source": "/index.html", "destination": "/public/index.html" },
+    { "source": "/js/(.*)", "destination": "/public/js/$1" },
+    { "source": "/css/(.*)", "destination": "/public/css/$1" },
+    { "source": "/", "destination": "/public/index.html" }
+  ]
+}

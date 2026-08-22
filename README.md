@@ -34,10 +34,11 @@ Registration of new examinees uses a simulated OTP (no SMS gateway — the code 
 ## Architecture
 
 ```
-server/
-  index.js            Express app entry (serves API + static frontend)
-  db.js               SQLite schema (node:sqlite, WAL) — users, sessions, topics,
-                      items, exams, exam_items, attempts, audit
+api/
+  index.js            Vercel serverless entry (exports the Express app)
+  server/             Express backend (app.js wires routes; local entry: npm start -> dev.js)
+  db.js               SQLite/libSQL adapter - schema (users, sessions, topics,
+                      items, exams, exam_items, attempts, audit_log), tx(), audit()
   auth.js             scrypt password hashing, HttpOnly session cookies,
                       RBAC middleware, OTP store, brute-force lockout
   routes-auth.js      register → OTP verify → login/logout/profile/password
@@ -79,3 +80,23 @@ public/
 ## Tech stack
 
 Express 5 · SQLite via `node:sqlite` (zero native deps) · vanilla JS SPA · SVG charts · Thai/English i18n.
+
+## Deploy to Vercel
+
+The serverless filesystem is read-only, so Vercel runs the app against a free **libSQL/Turso** database instead of a local file.
+
+1. Create a Turso database and auth token:
+   ```bash
+   turso db create exam-library
+   turso db show exam-library --url      # -> DATABASE_URL  (libsql://...)
+   turso db tokens create exam-library   # -> DATABASE_AUTH_TOKEN
+   ```
+   (No CLI? Create a free database at [turso.tech](https://turso.tech) — same two values.)
+
+2. In your Vercel project → Settings → Environment Variables, add:
+   - `DATABASE_URL` = `libsql://...`
+   - `DATABASE_AUTH_TOKEN` = `...`
+
+3. Push (or redeploy). On first request the function creates the schema and seeds demo data automatically.
+
+Local dev stays unchanged: `npm start` uses built-in SQLite at `data/app.db`.

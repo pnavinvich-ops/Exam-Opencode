@@ -27,7 +27,7 @@ if (REMOTE_URL) {
     process.exit(1);
   }
   const { DatabaseSync } = require('node:sqlite');
-  const DATA_DIR = path.join(__dirname, '..', 'data');
+  const DATA_DIR = path.join(__dirname, '..', '..', 'data');
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   localDb = new DatabaseSync(path.join(DATA_DIR, 'app.db'));
 }

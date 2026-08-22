@@ -40,17 +40,22 @@ function parseCookies(req) {
   return out;
 }
 
+function cookieAttrs(req) {
+  // Secure only when the request is actually HTTPS (trust proxy is enabled in app.js).
+  return req && req.secure ? '; Secure' : '';
+}
+
 async function createSession(res, userId) {
   const token = newToken();
   const expires = new Date(Date.now() + SESSION_TTL_MS).toISOString();
   await q.run('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)', sha256(token), userId, expires);
-  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax${cookieAttrs(res.req)}; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
 }
 
 async function destroySession(req, res) {
   const token = parseCookies(req)[COOKIE_NAME];
   if (token) await q.run('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
-  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax${cookieAttrs(req)}; Max-Age=0`);
 }
 
 async function currentUser(req) {
