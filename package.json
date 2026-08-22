@@ -5,12 +5,13 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node --no-warnings server/index.js",
-    "check": "node --check server/index.js && node --check server/db.js && node --check server/auth.js && node --check server/seed.js"
+    "check": "node --check server/index.js && node --check server/db.js && node --check server/auth.js && node --check server/seed.js && node --check server/examEngine.js && node --check server/routes-auth.js && node --check server/routes-student.js && node --check server/routes-admin.js"
   },
   "engines": {
     "node": ">=23.4.0"
   },
   "dependencies": {
+    "@libsql/client": "^0.17.4",
     "express": "^5.1.0"
   }
 }

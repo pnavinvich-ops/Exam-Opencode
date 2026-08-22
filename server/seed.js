@@ -1,6 +1,6 @@
 'use strict';
 
-const { q, tx, nowIso, audit } = require('./db');
+const { q, tx, nowIso, audit, ensureSchema } = require('./db');
 const { hashPassword } = require('./auth');
 const { iso, buildExamItems, sampleByBlueprint } = require('./examEngine');
 
@@ -139,57 +139,63 @@ const ITEMS = [
 const PAST_EXAM_ITEM_IDS = [1, 3, 7, 9, 11, 14, 17, 21, 25, 27];
 const WRONG_COUNTS = { student1: 1, student2: 3, student3: 6 };
 
-function ensureSeeded() {
-  const seeded = q.get(`SELECT value FROM meta WHERE key = 'seeded'`);
+async function ensureSeeded() {
+  await ensureSchema();
+  const seeded = await q.get(`SELECT value FROM meta WHERE key = 'seeded'`);
   if (seeded) return;
 
-  tx(() => {
-    TOPICS.forEach(([th, en], i) => {
-      q.run('INSERT INTO topics (name_th, name_en, position) VALUES (?, ?, ?)', th, en, i + 1);
-    });
+  await tx(async (t) => {
+    let pos = 1;
+    for (const [th, en] of TOPICS) {
+      await t.run('INSERT INTO topics (name_th, name_en, position) VALUES (?, ?, ?)', th, en, pos++);
+    }
 
-    ITEMS.forEach((it) => {
-      q.run(
+    for (const it of ITEMS) {
+      await t.run(
         `INSERT INTO items (topic_id, difficulty, question_th, question_en, choices_th, choices_en,
          correct_index, explanation_th, explanation_en, active, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         it.topic, it.diff, it.q_th, it.q_en, JSON.stringify(it.c_th), JSON.stringify(it.c_en),
         it.correct, it.e_th, it.e_en, nowIso(), nowIso()
       );
-    });
+    }
 
-    const mkUser = (username, password, role, firstName, lastName, org, status = 'active') => {
+    const mkUser = async (username, password, role, firstName, lastName, org, status = 'active') => {
       const salt = require('./auth').makeSalt();
-      return q.run(
+      const r = await t.run(
         `INSERT INTO users (username, pass_hash, salt, role, first_name, last_name, org, email, status, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
         username, hashPassword(password, salt), salt, role, firstName, lastName, org, status, nowIso()
-      ).lastInsertRowid;
+      );
+      return r.lastInsertRowid;
     };
 
-    mkUser('admin', 'Admin@1234', 'admin', 'ผู้ดูแล', 'ระบบ', 'คณะวิทยาศาสตร์และเทคโนโลยี');
-    const s1 = mkUser('student1', 'Student@1234', 'student', 'สมชาย', 'ใจดี', 'ฟิสิกส์ ปี 2');
-    const s2 = mkUser('student2', 'Student@1234', 'student', 'สมหญิง', 'เรียนเก่ง', 'ฟิสิกส์ ปี 2');
-    const s3 = mkUser('student3', 'Student@1234', 'student', 'อนันต์', 'ขยันมาก', 'ฟิสิกส์ ปี 1');
+    await mkUser('admin', 'Admin@1234', 'admin', 'ผู้ดูแล', 'ระบบ', 'คณะวิทยาศาสตร์และเทคโนโลยี');
+    const s1 = await mkUser('student1', 'Student@1234', 'student', 'สมชาย', 'ใจดี', 'ฟิสิกส์ ปี 2');
+    const s2 = await mkUser('student2', 'Student@1234', 'student', 'สมหญิง', 'เรียนเก่ง', 'ฟิสิกส์ ปี 2');
+    const s3 = await mkUser('student3', 'Student@1234', 'student', 'อนันต์', 'ขยันมาก', 'ฟิสิกส์ ปี 1');
 
     // Past (closed) exam with graded attempts so reports/charts have data.
-    const pastExamId = q.run(
-      `INSERT INTO exams (title_th, title_en, description, duration_min, open_at, close_at, shuffle, published, blueprint, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, NULL, ?)`,
-      'สอบเก็บคะแนนกลางภาค ฟิสิกส์', 'Physics Midterm Quiz',
-      'ข้อสอบย้อนหลังสำหรับสาธิตรายงานผล (ปิดรับสอบแล้ว)',
-      20, iso(-30), iso(-28),
-      JSON.stringify({ 1: { 1: 1, 2: 1 }, 2: { 1: 1, 2: 1, 3: 1 }, 3: { 1: 1, 3: 1 }, 4: { 2: 1 }, 5: { 1: 1, 2: 1 } }),
-      nowIso()
+    const pastExamId = (
+      await t.run(
+        `INSERT INTO exams (title_th, title_en, description, duration_min, open_at, close_at, shuffle, published, blueprint, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, NULL, ?)`,
+        'สอบเก็บคะแนนกลางภาค ฟิสิกส์', 'Physics Midterm Quiz',
+        'ข้อสอบย้อนหลังสำหรับสาธิตรายงานผล (ปิดรับสอบแล้ว)',
+        20, iso(-30), iso(-28),
+        JSON.stringify({ 1: { 1: 1, 2: 1 }, 2: { 1: 1, 2: 1, 3: 1 }, 3: { 1: 1, 3: 1 }, 4: { 2: 1 }, 5: { 1: 1, 2: 1 } }),
+        nowIso()
+      )
     ).lastInsertRowid;
-    buildExamItems(pastExamId, PAST_EXAM_ITEM_IDS, false);
+    await buildExamItems(t, pastExamId, PAST_EXAM_ITEM_IDS, false);
 
-    const pastItems = q.all(
+    const pastItems = await t.all(
       `SELECT i.id, i.correct_index FROM exam_items ei JOIN items i ON i.id = ei.item_id
        WHERE ei.exam_id = ? ORDER BY ei.position`, pastExamId);
 
     const submittedBase = Date.now() - 29 * 86400000;
-    [[s1, 'student1'], [s2, 'student2'], [s3, 'student3']].forEach(([uid, uname], ai) => {
+    let ai = 0;
+    for (const [uid, uname] of [[s1, 'student1'], [s2, 'student2'], [s3, 'student3']]) {
       let wrongLeft = WRONG_COUNTS[uname];
       const answers = {};
       for (const row of pastItems) {
@@ -198,28 +204,31 @@ function ensureSeeded() {
       const score = pastItems.length - WRONG_COUNTS[uname];
       const started = new Date(submittedBase - 15 * 60000).toISOString();
       const submitted = new Date(submittedBase + ai * 120000).toISOString();
-      q.run(
+      await t.run(
         `INSERT INTO attempts (exam_id, user_id, started_at, deadline_at, submitted_at, answers, flagged, status, score)
          VALUES (?, ?, ?, ?, ?, ?, '[]', 'submitted', ?)`,
         pastExamId, uid, started, new Date(submittedBase).toISOString(), submitted, JSON.stringify(answers), score
       );
-    });
+      ai += 1;
+    }
 
     // Open practice exam available right now.
-    const { picked } = sampleByBlueprint({ 1: { 1: 1, 2: 1 }, 2: { 1: 1, 2: 1 }, 3: { 1: 1, 2: 1 }, 4: { 1: 1, 2: 1 }, 5: { 1: 1, 2: 1 }, 6: { 1: 1, 2: 1 } });
-    const demoId = q.run(
-      `INSERT INTO exams (title_th, title_en, description, duration_min, open_at, close_at, shuffle, published, blueprint, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, NULL, ?)`,
-      'ชุดฝึก CBT ฟิสิกส์ (สาธิต)', 'Physics CBT Practice (Demo)',
-      'แบบทดสอบ 5 ตัวเลือก 12 ข้อ เปิดให้ทำได้ทันที',
-      20, iso(0, -1), iso(30),
-      JSON.stringify({ 1: { 1: 1, 2: 1 }, 2: { 1: 1, 2: 1 }, 3: { 1: 1, 2: 1 }, 4: { 1: 1, 2: 1 }, 5: { 1: 1, 2: 1 }, 6: { 1: 1, 2: 1 } }),
-      nowIso()
+    const { picked } = await sampleByBlueprint({ 1: { 1: 1, 2: 1 }, 2: { 1: 1, 2: 1 }, 3: { 1: 1, 2: 1 }, 4: { 1: 1, 2: 1 }, 5: { 1: 1, 2: 1 }, 6: { 1: 1, 2: 1 } });
+    const demoId = (
+      await t.run(
+        `INSERT INTO exams (title_th, title_en, description, duration_min, open_at, close_at, shuffle, published, blueprint, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, NULL, ?)`,
+        'ชุดฝึก CBT ฟิสิกส์ (สาธิต)', 'Physics CBT Practice (Demo)',
+        'แบบทดสอบ 5 ตัวเลือก 12 ข้อ เปิดให้ทำได้ทันที',
+        20, iso(0, -1), iso(30),
+        JSON.stringify({ 1: { 1: 1, 2: 1 }, 2: { 1: 1, 2: 1 }, 3: { 1: 1, 2: 1 }, 4: { 1: 1, 2: 1 }, 5: { 1: 1, 2: 1 }, 6: { 1: 1, 2: 1 } }),
+        nowIso()
+      )
     ).lastInsertRowid;
-    buildExamItems(demoId, picked, true);
+    await buildExamItems(t, demoId, picked, true);
 
-    audit(null, 'seed', 'database seeded');
-    q.run(`INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded', ?)`, nowIso());
+    await audit(null, 'seed', 'database seeded');
+    await t.run(`INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded', ?)`, nowIso());
   });
 }
 

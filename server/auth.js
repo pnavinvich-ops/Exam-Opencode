@@ -23,8 +23,8 @@ function sha256(s) {
 }
 
 function safeEqual(a, b) {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
   if (ba.length !== bb.length) return false;
   return crypto.timingSafeEqual(ba, bb);
 }
@@ -40,23 +40,23 @@ function parseCookies(req) {
   return out;
 }
 
-function createSession(res, userId) {
+async function createSession(res, userId) {
   const token = newToken();
   const expires = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-  q.run('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)', sha256(token), userId, expires);
+  await q.run('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)', sha256(token), userId, expires);
   res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
 }
 
-function destroySession(req, res) {
+async function destroySession(req, res) {
   const token = parseCookies(req)[COOKIE_NAME];
-  if (token) q.run('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
+  if (token) await q.run('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
   res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
 }
 
-function currentUser(req) {
+async function currentUser(req) {
   const token = parseCookies(req)[COOKIE_NAME];
   if (!token) return null;
-  const row = q.get(`
+  const row = await q.get(`
     SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.expires_at > ?`, sha256(token), nowIso());
   if (!row) return null;
@@ -64,19 +64,23 @@ function currentUser(req) {
   return row;
 }
 
-function requireAuth(req, res, next) {
-  const user = currentUser(req);
-  if (!user) return res.status(401).json({ error: 'UNAUTHORIZED' });
-  req.user = user;
-  next();
+async function requireAuth(req, res, next) {
+  try {
+    const user = await currentUser(req);
+    if (!user) return res.status(401).json({ error: 'UNAUTHORIZED' });
+    req.user = user;
+    next();
+  } catch (e) { next(e); }
 }
 
-function requireAdmin(req, res, next) {
-  const user = currentUser(req);
-  if (!user) return res.status(401).json({ error: 'UNAUTHORIZED' });
-  if (user.role !== 'admin') return res.status(403).json({ error: 'FORBIDDEN' });
-  req.user = user;
-  next();
+async function requireAdmin(req, res, next) {
+  try {
+    const user = await currentUser(req);
+    if (!user) return res.status(401).json({ error: 'UNAUTHORIZED' });
+    if (user.role !== 'admin') return res.status(403).json({ error: 'FORBIDDEN' });
+    req.user = user;
+    next();
+  } catch (e) { next(e); }
 }
 
 const lockouts = new Map();

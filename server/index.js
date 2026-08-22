@@ -19,7 +19,10 @@ const authRoutes = require('./routes-auth');
 const studentRoutes = require('./routes-student');
 const adminRoutes = require('./routes-admin');
 
-ensureSeeded();
+ensureSeeded().catch((e) => {
+  console.error('❌ Database seeding failed:', e);
+  process.exit(1);
+});
 
 const app = express();
 app.disable('x-powered-by');
