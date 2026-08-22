@@ -145,10 +145,12 @@ async function runBatch(stmts) {
   return stmts.map(execLocalStmt);
 }
 
-// tx(fn): fn receives transaction-scoped helpers { get, all, run } as its first argument.
-// On Turso this is a stateful stream: BEGIN IMMEDIATE ... COMMIT/ROLLBACK over one baton.
-// Streams expire server-side after enough wall-clock time, so when that happens mid-way
-// (HTTP 404 "stream not found") the callback is simply re-run from scratch on a fresh stream.
+// tx(fn): fn receives transaction-scoped helpers { get, all, run, batch }.
+// Remote mode buffers writes and flushes them in large pipelines so the whole
+// transaction finishes in a couple of round-trips (Turso expires long-lived
+// streams; a fresh stream also sidesteps that). Reads flush pending writes
+// first, so callbacks always see their own writes. If a stream expires
+// mid-flight ("stream not found"), the callback is re-run on a new one.
 async function tx(fn) {
   if (REMOTE_URL) {
     const MAX_ATTEMPTS = 5;
@@ -156,45 +158,47 @@ async function tx(fn) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       let baton = null;
       let dead = false;
-      const step = async (sql, ...p) => {
-        if (dead) throw new Error('transaction stream already closed');
+      let pending = [{ sql: 'BEGIN IMMEDIATE', args: [] }];
+      let began = false;
+
+      const flush = async () => {
+        if (!pending.length) return;
+        const stmts = pending;
+        pending = [];
+        const t0 = Date.now();
         try {
-          const r = await pipe(baton, sql, normParams(p));
+          const r = await pipeMulti(baton, stmts);
           baton = r.baton;
-          return r;
+          began = true;
+          if (process.env.DB_DEBUG) console.error(`[tx] flush ${stmts.length} stmts (${Date.now() - t0}ms) first=${JSON.stringify(stmts[0].sql).slice(0, 60)}`);
         } catch (e) {
+          if (process.env.DB_DEBUG) console.error(`[tx] FLUSH FAIL ${stmts.length} stmts (${Date.now() - t0}ms): ${e.message.slice(0, 120)}`);
           if (/stream not found|expired|closed/i.test(String(e.message))) dead = true;
           throw e;
         }
       };
-      const api = {
-        all: async (sql, ...p) => (await step(sql, ...p)).rows,
-        get: async (sql, ...p) => (await step(sql, ...p)).rows[0],
-        run: async (sql, ...p) => {
-          const r = await step(sql, ...p);
-          return { changes: r.changes, lastInsertRowid: r.lastInsertRowid };
-        },
-        batch: async (stmts) => {
-          if (!stmts.length) return [];
-          try {
-            const r = await pipeMulti(baton, stmts);
-            baton = r.baton;
-            return r.results;
-          } catch (e) {
-            if (/stream not found|expired|closed/i.test(String(e.message))) dead = true;
-            throw e;
-          }
-        },
-      };
+
       try {
-        await step('BEGIN IMMEDIATE');
+        const api = {
+          run: async (sql, ...p) => { pending.push({ sql, args: p }); return { changes: 0, lastInsertRowid: undefined }; },
+          batch: async (stmts) => { for (const s of stmts) pending.push({ sql: s.sql, args: s.args || [] }); return []; },
+          all: async (sql, ...p) => {
+            await flush();
+            const r = await pipeMulti(baton, [{ sql, args: p }]);
+            baton = r.baton;
+            return r.results[0].rows;
+          },
+          get: async (sql, ...p) => (await api.all(sql, ...p))[0],
+        };
         const out = await fn(api);
-        await step('COMMIT');
+        pending.push({ sql: 'COMMIT', args: [] });
+        await flush();
         return out;
       } catch (e) {
         lastErr = e;
-        if (!dead) {
-          try { await step('ROLLBACK'); } catch { /* ignore */ }
+        pending = [];
+        if (!dead && began) {
+          try { await pipeMulti(baton, [{ sql: 'ROLLBACK', args: [] }]); } catch { /* ignore */ }
         }
         if (!/stream not found|expired|closed/i.test(String(e.message)) || attempt === MAX_ATTEMPTS) throw e;
       }

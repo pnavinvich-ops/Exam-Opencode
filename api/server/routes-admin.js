@@ -383,13 +383,14 @@ router.post('/exams/create', requireAdmin, async (req, res, next) => {
     }
 
     const examId = await tx(async (t) => {
-      const r = await t.run(
+      const row = await t.get(
         `INSERT INTO exams (title_th, title_en, description, duration_min, open_at, close_at, shuffle, published, blueprint, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING id`,
         titleTh, titleEn, description, durationMin, b.openAt, b.closeAt,
         b.shuffle ? 1 : 0, b.published ? 1 : 0, JSON.stringify(b.blueprint || {}), req.user.id, nowIso());
-      await buildExamItems(t, r.lastInsertRowid, picked, false);
-      return r.lastInsertRowid;
+      await buildExamItems(t, Number(row.id), picked, false);
+      return Number(row.id);
     });
     await audit(req.user.id, 'exam.create', `${examId} items:${picked.length}`);
     res.json({ ok: true, id: examId, itemCount: picked.length, shortfall });
