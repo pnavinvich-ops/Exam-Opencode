@@ -1,5 +1,16 @@
 'use strict';
 
+// This app uses the built-in SQLite of Node.js (node:sqlite), which needs Node >= 23.4.
+try {
+  require('node:sqlite');
+} catch (e) {
+  console.error('\n❌ node:sqlite is not available in your Node.js ' + process.version);
+  console.error('   This project requires Node.js >= 23.4 (built-in SQLite).');
+  console.error('   Fix: install a current LTS/Current Node from https://nodejs.org,');
+  console.error('   then run:  npm install && npm start\n');
+  process.exit(1);
+}
+
 const path = require('node:path');
 const express = require('express');
 
@@ -33,6 +44,16 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = Number(process.env.PORT) || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Physics Exam Library running at http://localhost:${PORT}`);
+  console.log('Open this address in your browser. Demo login: admin / Admin@1234');
+});
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n❌ Port ${PORT} is already in use.`);
+    console.error('   Another server is probably still running.');
+    console.error('   Fix: close it, or run on another port:  set PORT=3001 && npm start\n');
+    process.exit(1);
+  }
+  throw err;
 });
