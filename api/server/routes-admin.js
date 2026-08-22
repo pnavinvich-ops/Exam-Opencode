@@ -172,13 +172,18 @@ router.delete('/users/:id', requireAdmin, async (req, res, next) => {
 });
 
 // ================= items =================
-async function validateItemPayload(b) {
+async function loadTopicIds() {
+  const rows = await q.all('SELECT id FROM topics');
+  return new Set(rows.map((r) => Number(r.id)));
+}
+
+function validateItemPayload(b, topicIds) {
   const topicId = Number(b.topicId);
   const difficulty = Number(b.difficulty);
   const correctIndex = Number(b.correctIndex);
   const questionTh = str(b.questionTh, 1000);
   const questionEn = typeof b.questionEn === 'string' ? b.questionEn.trim().slice(0, 1000) : '';
-  if (!Number.isInteger(topicId) || !(await q.get(`SELECT id FROM topics WHERE id=?`, topicId))) return { err: 'TOPIC_INVALID' };
+  if (!Number.isInteger(topicId) || !topicIds.has(topicId)) return { err: 'TOPIC_INVALID' };
   if (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 4) return { err: 'DIFFICULTY_INVALID' };
   if (!questionTh) return { err: 'QUESTION_REQUIRED' };
   if (!Array.isArray(b.choicesTh) || b.choicesTh.length !== 5 || b.choicesTh.some(c => !str(c, 300))) return { err: 'CHOICES_5_REQUIRED' };
@@ -229,7 +234,8 @@ router.get('/items', requireAdmin, async (req, res, next) => {
 
 router.post('/items', requireAdmin, async (req, res, next) => {
   try {
-    const v = await validateItemPayload(req.body || {});
+    const topicIds = await loadTopicIds();
+    const v = validateItemPayload(req.body || {}, topicIds);
     if (v.err) return bad(res, v.err);
     const r = await q.run(
       `INSERT INTO items (topic_id, difficulty, question_th, question_en, choices_th, choices_en, correct_index, explanation_th, explanation_en, active, created_at, updated_at)
@@ -246,7 +252,8 @@ router.put('/items/:id', requireAdmin, async (req, res, next) => {
     const id = Number(req.params.id);
     const item = Number.isInteger(id) && await q.get(`SELECT * FROM items WHERE id = ?`, id);
     if (!item) return bad(res, 'ITEM_NOT_FOUND', 404);
-    const v = await validateItemPayload(req.body || {});
+    const topicIds = await loadTopicIds();
+    const v = validateItemPayload(req.body || {}, topicIds);
     if (v.err) return bad(res, v.err);
     await q.run(
       `UPDATE items SET topic_id=?, difficulty=?, question_th=?, question_en=?, choices_th=?, choices_en=?,
@@ -291,24 +298,30 @@ router.post('/items/import', requireAdmin, async (req, res, next) => {
   try {
     const list = Array.isArray((req.body || {}).items) ? req.body.items.slice(0, 500) : [];
     if (!list.length) return bad(res, 'IMPORT_EMPTY');
+    const topicIds = await loadTopicIds();
     let inserted = 0;
     const errors = [];
+    const stmts = [];
+    list.forEach((raw, i) => {
+      try {
+        const v = validateItemPayload(raw, topicIds);
+        if (v.err) throw new Error(v.err);
+        const ts = nowIso();
+        stmts.push({
+          sql: `INSERT INTO items (topic_id, difficulty, question_th, question_en, choices_th, choices_en, correct_index, explanation_th, explanation_en, active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+          args: [v.topicId, v.difficulty, v.questionTh, v.questionEn, JSON.stringify(v.choicesTh), JSON.stringify(v.choicesEn),
+            v.correctIndex, v.explTh, v.explEn, ts, ts],
+        });
+      } catch (e) {
+        errors.push({ index: i, error: e.message });
+      }
+    });
     await tx(async (t) => {
-      let i = 0;
-      for (const raw of list) {
-        try {
-          const v = await validateItemPayload(raw);
-          if (v.err) throw new Error(v.err);
-          await t.run(
-            `INSERT INTO items (topic_id, difficulty, question_th, question_en, choices_th, choices_en, correct_index, explanation_th, explanation_en, active, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-            v.topicId, v.difficulty, v.questionTh, v.questionEn, JSON.stringify(v.choicesTh), JSON.stringify(v.choicesEn),
-            v.correctIndex, v.explTh, v.explEn, nowIso(), nowIso());
-          inserted += 1;
-        } catch (e) {
-          errors.push({ index: i, error: e.message });
-        }
-        i += 1;
+      const CHUNK = 40;
+      for (let i = 0; i < stmts.length; i += CHUNK) {
+        const rs = await t.batch(stmts.slice(i, i + CHUNK));
+        inserted += rs.length;
       }
     });
     await audit(req.user.id, 'item.import', `inserted:${inserted}`);

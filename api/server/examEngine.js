@@ -18,7 +18,7 @@ function grade(orderedItems, answers) {
   return { score, detail };
 }
 
-// txApi: transaction-scoped { run } helpers from db.tx()
+// txApi: transaction-scoped { run, batch } helpers from db.tx()
 async function buildExamItems(txApi, examId, itemIds, shuffle) {
   let ids = [...itemIds];
   if (shuffle) {
@@ -28,25 +28,40 @@ async function buildExamItems(txApi, examId, itemIds, shuffle) {
     }
   }
   let pos = 1;
-  for (const itemId of ids) {
-    await txApi.run('INSERT INTO exam_items (exam_id, item_id, position) VALUES (?, ?, ?)', examId, itemId, pos++);
-  }
+  await txApi.batch(ids.map((itemId) => ({
+    sql: 'INSERT INTO exam_items (exam_id, item_id, position) VALUES (?, ?, ?)',
+    args: [examId, itemId, pos++],
+  })));
 }
 
-async function sampleByBlueprint(bp) {
-  const picked = [];
-  const shortfall = [];
+// dbApi defaults to the global handle; pass a tx api when sampling inside a transaction.
+// All pool SELECTs go out as ONE batched round-trip.
+async function sampleByBlueprint(bp, dbApi = q) {
+  const stmts = [];
   for (const [topicIdStr, byDiff] of Object.entries(bp)) {
     for (const [diffStr, count] of Object.entries(byDiff)) {
       const need = Number(count) || 0;
       if (need <= 0) continue;
-      const pool = await q.all(
-        'SELECT id FROM items WHERE active=1 AND topic_id=? AND difficulty=? ORDER BY RANDOM() LIMIT ?',
-        Number(topicIdStr), Number(diffStr), need);
-      picked.push(...pool.map((r) => r.id));
-      if (pool.length < need) shortfall.push({ topicId: Number(topicIdStr), diff: Number(diffStr), missing: need - pool.length });
+      stmts.push({
+        sql: 'SELECT id FROM items WHERE active=1 AND topic_id=? AND difficulty=? ORDER BY RANDOM() LIMIT ?',
+        args: [Number(topicIdStr), Number(diffStr), need],
+        topicId: Number(topicIdStr),
+        diff: Number(diffStr),
+        need,
+      });
     }
   }
+  if (!stmts.length) return { picked: [], shortfall: [] };
+
+  const picked = [];
+  const shortfall = [];
+  const results = await dbApi.batch(stmts);
+  results.forEach((res, i) => {
+    const meta = stmts[i];
+    const pool = res.rows.map((r) => r.id);
+    picked.push(...pool);
+    if (pool.length < meta.need) shortfall.push({ topicId: meta.topicId, diff: meta.diff, missing: meta.need - pool.length });
+  });
   return { picked, shortfall };
 }
 

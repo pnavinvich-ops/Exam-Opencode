@@ -71,10 +71,22 @@ function hranaValue(v) {
 }
 
 async function pipe(baton, sql, params) {
+  const r = await pipeMulti(baton, [{ sql, args: params }]);
+  return { baton: r.baton, ...(r.results[0]) };
+}
+
+async function pipeMulti(batonIn, stmts) {
+  const body = {
+    requests: stmts.map((s) => ({
+      type: 'execute',
+      stmt: { sql: s.sql, args: normParams(s.args || []).map(hranaValue) },
+    })),
+  };
+  if (batonIn !== undefined && batonIn !== null) body.baton = batonIn;
   const res = await fetch(`${REMOTE_HTTP}/v2/pipeline`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${REMOTE_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ baton, requests: [{ type: 'execute', stmt: { sql, args: params.map(hranaValue) } }] }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(30000),
   });
   if (!res.ok) {
@@ -82,19 +94,18 @@ async function pipe(baton, sql, params) {
     throw new Error(`libsql HTTP ${res.status}: ${detail}`);
   }
   const data = await res.json();
-  const out = (data.results || [])[0];
-  if (!out || out.type !== 'ok') {
-    throw new Error(`libsql step error: ${JSON.stringify(out).slice(0, 300)}`);
-  }
-  const resp = out.response;
-  if (!resp || resp.type !== 'execute') throw new Error('Unexpected libsql response');
-  const cols = (resp.result.cols || []).map((c) => c.name);
-  return {
-    baton: data.baton,
-    rows: (resp.result.rows || []).map((r) => rowFromLibsql(r, cols)),
-    changes: Number(resp.result.affected_row_count || 0),
-    lastInsertRowid: resp.result.last_insert_rowid != null ? Number(resp.result.last_insert_rowid) : undefined,
-  };
+  const results = (data.results || []).map((out) => {
+    if (!out || out.type !== 'ok') throw new Error(`libsql step error: ${JSON.stringify(out).slice(0, 300)}`);
+    const resp = out.response;
+    if (!resp || resp.type !== 'execute') throw new Error('Unexpected libsql response');
+    const cols = (resp.result.cols || []).map((c) => c.name);
+    return {
+      rows: (resp.result.rows || []).map((r) => rowFromLibsql(r, cols)),
+      changes: Number(resp.result.affected_row_count || 0),
+      lastInsertRowid: resp.result.last_insert_rowid != null ? Number(resp.result.last_insert_rowid) : undefined,
+    };
+  });
+  return { baton: data.baton, results };
 }
 
 async function all(sql, ...params) {
@@ -109,11 +120,29 @@ async function get(sql, ...params) {
 
 async function run(sql, ...params) {
   if (REMOTE_URL) {
-    const r = await pipe(null, sql, normParams(params));
+    const r = await pipe(null, sql, params);
     return { changes: r.changes, lastInsertRowid: r.lastInsertRowid };
   }
-  const r = localDb.prepare(sql).run(...normParams(params));
+  const r = localDb.prepare(sql).run(...params);
   return { changes: Number(r.changes), lastInsertRowid: r.lastInsertRowid != null ? Number(r.lastInsertRowid) : undefined };
+}
+
+function execLocalStmt(s) {
+  const params = normParams(s.args || []);
+  const isRead = /^\s*(select|with)\b/i.test(String(s.sql));
+  if (isRead) {
+    const rows = localDb.prepare(s.sql).all(...params);
+    return { rows, changes: 0, lastInsertRowid: undefined };
+  }
+  const r = localDb.prepare(s.sql).run(...params);
+  return { rows: [], changes: Number(r.changes), lastInsertRowid: r.lastInsertRowid != null ? Number(r.lastInsertRowid) : undefined };
+}
+
+// Execute many statements in ONE round-trip. stmts: [{ sql, args: [...] }]
+async function runBatch(stmts) {
+  if (!stmts.length) return [];
+  if (REMOTE_URL) return (await pipeMulti(null, stmts)).results;
+  return stmts.map(execLocalStmt);
 }
 
 // tx(fn): fn receives transaction-scoped helpers { get, all, run } as its first argument.
@@ -145,6 +174,17 @@ async function tx(fn) {
           const r = await step(sql, ...p);
           return { changes: r.changes, lastInsertRowid: r.lastInsertRowid };
         },
+        batch: async (stmts) => {
+          if (!stmts.length) return [];
+          try {
+            const r = await pipeMulti(baton, stmts);
+            baton = r.baton;
+            return r.results;
+          } catch (e) {
+            if (/stream not found|expired|closed/i.test(String(e.message))) dead = true;
+            throw e;
+          }
+        },
       };
       try {
         await step('BEGIN IMMEDIATE');
@@ -169,6 +209,7 @@ async function tx(fn) {
       const r = localDb.prepare(sql).run(...normParams(p));
       return { changes: Number(r.changes), lastInsertRowid: r.lastInsertRowid != null ? Number(r.lastInsertRowid) : undefined };
     },
+    batch: async (stmts) => stmts.map(execLocalStmt),
   };
   try {
     const out = await fn(lapi);
@@ -288,7 +329,7 @@ async function ensureSchema() {
 }
 
 module.exports = {
-  q: { get, all, run },
+  q: { get, all, run, batch: runBatch },
   tx,
   audit,
   nowIso,

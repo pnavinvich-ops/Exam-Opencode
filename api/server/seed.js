@@ -145,35 +145,44 @@ async function ensureSeeded() {
   if (seeded) return;
 
   await tx(async (t) => {
+    // Topics: one batch.
     let pos = 1;
-    for (const [th, en] of TOPICS) {
-      await t.run('INSERT INTO topics (name_th, name_en, position) VALUES (?, ?, ?)', th, en, pos++);
-    }
+    await t.batch(TOPICS.map(([th, en]) => ({
+      sql: 'INSERT INTO topics (name_th, name_en, position) VALUES (?, ?, ?)',
+      args: [th, en, pos++],
+    })));
 
-    for (const it of ITEMS) {
-      await t.run(
-        `INSERT INTO items (topic_id, difficulty, question_th, question_en, choices_th, choices_en,
-         correct_index, explanation_th, explanation_en, active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-        it.topic, it.diff, it.q_th, it.q_en, JSON.stringify(it.c_th), JSON.stringify(it.c_en),
-        it.correct, it.e_th, it.e_en, nowIso(), nowIso()
-      );
-    }
+    // Items: one batch.
+    const ts = nowIso();
+    await t.batch(ITEMS.map((it) => ({
+      sql: `INSERT INTO items (topic_id, difficulty, question_th, question_en, choices_th, choices_en,
+             correct_index, explanation_th, explanation_en, active, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      args: [it.topic, it.diff, it.q_th, it.q_en, JSON.stringify(it.c_th), JSON.stringify(it.c_en),
+        it.correct, it.e_th, it.e_en, ts, ts],
+    })));
 
-    const mkUser = async (username, password, role, firstName, lastName, org, status = 'active') => {
-      const salt = require('./auth').makeSalt();
-      const r = await t.run(
-        `INSERT INTO users (username, pass_hash, salt, role, first_name, last_name, org, email, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
-        username, hashPassword(password, salt), salt, role, firstName, lastName, org, status, nowIso()
-      );
-      return r.lastInsertRowid;
-    };
-
-    await mkUser('admin', 'Admin@1234', 'admin', 'ผู้ดูแล', 'ระบบ', 'คณะวิทยาศาสตร์และเทคโนโลยี');
-    const s1 = await mkUser('student1', 'Student@1234', 'student', 'สมชาย', 'ใจดี', 'ฟิสิกส์ ปี 2');
-    const s2 = await mkUser('student2', 'Student@1234', 'student', 'สมหญิง', 'เรียนเก่ง', 'ฟิสิกส์ ปี 2');
-    const s3 = await mkUser('student3', 'Student@1234', 'student', 'อนันต์', 'ขยันมาก', 'ฟิสิกส์ ปี 1');
+    // Users: batch insert, then fetch ids in one query.
+    const mkSalt = require('./auth').makeSalt;
+    const userRows = [
+      ['admin', 'Admin@1234', 'admin', 'ผู้ดูแล', 'ระบบ', 'คณะวิทยาศาสตร์และเทคโนโลยี'],
+      ['student1', 'Student@1234', 'student', 'สมชาย', 'ใจดี', 'ฟิสิกส์ ปี 2'],
+      ['student2', 'Student@1234', 'student', 'สมหญิง', 'เรียนเก่ง', 'ฟิสิกส์ ปี 2'],
+      ['student3', 'Student@1234', 'student', 'อนันต์', 'ขยันมาก', 'ฟิสิกส์ ปี 1'],
+    ].map(([username, password, role, firstName, lastName, org]) => {
+      const salt = mkSalt();
+      return { username,
+        sql: `INSERT INTO users (username, pass_hash, salt, role, first_name, last_name, org, email, status, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, '', 'active', ?)`,
+        args: [username, hashPassword(password, salt), salt, role, firstName, lastName, org, nowIso()] };
+    });
+    await t.batch(userRows.map(({ sql, args }) => ({ sql, args })));
+    const idRows = await t.all(
+      `SELECT id, username FROM users WHERE username IN ('admin','student1','student2','student3')`);
+    const uidByName = new Map(idRows.map((r) => [r.username, r.id]));
+    const s1 = uidByName.get('student1');
+    const s2 = uidByName.get('student2');
+    const s3 = uidByName.get('student3');
 
     // Past (closed) exam with graded attempts so reports/charts have data.
     const pastExamId = (
@@ -195,6 +204,7 @@ async function ensureSeeded() {
 
     const submittedBase = Date.now() - 29 * 86400000;
     let ai = 0;
+    const attemptStmts = [];
     for (const [uid, uname] of [[s1, 'student1'], [s2, 'student2'], [s3, 'student3']]) {
       let wrongLeft = WRONG_COUNTS[uname];
       const answers = {};
@@ -204,16 +214,17 @@ async function ensureSeeded() {
       const score = pastItems.length - WRONG_COUNTS[uname];
       const started = new Date(submittedBase - 15 * 60000).toISOString();
       const submitted = new Date(submittedBase + ai * 120000).toISOString();
-      await t.run(
-        `INSERT INTO attempts (exam_id, user_id, started_at, deadline_at, submitted_at, answers, flagged, status, score)
-         VALUES (?, ?, ?, ?, ?, ?, '[]', 'submitted', ?)`,
-        pastExamId, uid, started, new Date(submittedBase).toISOString(), submitted, JSON.stringify(answers), score
-      );
+      attemptStmts.push({
+        sql: `INSERT INTO attempts (exam_id, user_id, started_at, deadline_at, submitted_at, answers, flagged, status, score)
+              VALUES (?, ?, ?, ?, ?, ?, '[]', 'submitted', ?)`,
+        args: [pastExamId, uid, started, new Date(submittedBase).toISOString(), submitted, JSON.stringify(answers), score],
+      });
       ai += 1;
     }
+    await t.batch(attemptStmts);
 
     // Open practice exam available right now.
-    const { picked } = await sampleByBlueprint({ 1: { 1: 1, 2: 1 }, 2: { 1: 1, 2: 1 }, 3: { 1: 1, 2: 1 }, 4: { 1: 1, 2: 1 }, 5: { 1: 1, 2: 1 }, 6: { 1: 1, 2: 1 } });
+    const { picked } = await sampleByBlueprint({ 1: { 1: 1, 2: 1 }, 2: { 1: 1, 2: 1 }, 3: { 1: 1, 2: 1 }, 4: { 1: 1, 2: 1 }, 5: { 1: 1, 2: 1 }, 6: { 1: 1, 2: 1 } }, t);
     const demoId = (
       await t.run(
         `INSERT INTO exams (title_th, title_en, description, duration_min, open_at, close_at, shuffle, published, blueprint, created_by, created_at)
